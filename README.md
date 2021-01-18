@@ -25,7 +25,7 @@ The general FluentD configuration for Kubernetes looks somewhat like this:
 
 For the purpose of this demo the following is going to happen:
 
-![FluentD Kubenetes](img/kubernetes-fluentd.svg)
+![FluentD Kubenetes](img/fluentd-kubernetes.svg)
 
 
 
