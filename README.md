@@ -206,3 +206,5 @@ use-cases. Further it is easy to imagine other use-cases that can be interesting
 
 In this way pushing configuration options to the cluster users is flexible and control over the FluentD configuration
 can be maintained.
+
+You can find the [files for the demo on github](https://github.com/sorend/fluentd-k8s).
