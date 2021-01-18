@@ -1,0 +1,33 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo-multiline
+  annotations:
+    fluentd/include: "true"
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluentd-logging-demo
+  namespace: demo-multiline
+  labels:
+    name: fluentd-logging-demo
+spec:
+  selector:
+    matchLabels:
+      name: fluentd-logging-demo
+  template:
+    metadata:
+      labels:
+        name: fluentd-logging-demo
+      annotations:
+        fluentd/multiline: "true"
+    spec:
+      containers:
+      - name: busybox
+        image: busybox
+        command:
+          - /bin/sh
+          - -c
+          - while sleep 5; do echo "$(date +'%Y-%m-%d %H:%M:%S%z') -- still logging...\nthis is the second line\nand the third line"; done

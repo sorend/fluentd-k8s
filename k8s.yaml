@@ -1,0 +1,304 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fluentd-k8s
+  labels:
+    app: fluentd-k8s
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fluentd-k8s
+  namespace: fluentd-k8s
+  labels:
+    app: fluentd-k8s
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fluentd-k8s
+  labels:
+    app: fluentd-k8s
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+      - namespaces
+    verbs:
+      - get
+      - list
+      - watch
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: fluentd-k8s
+  labels:
+    app: fluentd-k8s
+roleRef:
+  kind: ClusterRole
+  name: fluentd-k8s
+  apiGroup: rbac.authorization.k8s.io
+subjects:
+  - kind: ServiceAccount
+    name: fluentd-k8s
+    namespace: fluentd-k8s
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluentd-k8s
+  namespace: fluentd-k8s
+  labels:
+    engine: fluentd
+    app: fluentd-k8s
+spec:
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: fluentd-k8s
+  template:
+    metadata:
+      labels:
+        app: fluentd-k8s
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/port: '24231'
+    spec:
+      serviceAccountName: fluentd-k8s
+      terminationGracePeriodSeconds: 30
+      containers:
+      - name: fluentd-k8s
+        image: sorend/fluentd-k8s
+        imagePullPolicy: Always
+        securityContext:
+          privileged: true
+          runAsUser: 0
+        env:
+          - name: K8S_NODE_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName
+          - name: MY_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          - name: MY_POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: LOGGLY_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: fluentd-k8s
+                key: loggly.token
+        resources:
+          limits:
+            memory: 400Mi
+            cpu: 1
+          requests:
+            memory: 200Mi
+            cpu: 100m
+        volumeMounts:
+        - name: varlog
+          mountPath: /var/log
+        - name: varlogdest
+          mountPath: /var/log/pods
+          readOnly: true
+        - name: conf-configmap
+          mountPath: /fluentd/etc
+      volumes:
+      - name: varlog
+        hostPath:
+          path: /var/log
+      - name: varlogdest
+        hostPath:
+          path: /var/log/pods
+      - name: conf-configmap
+        configMap:
+          name: fluentd-k8s
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluentd-k8s
+  namespace: fluentd-k8s
+  labels:
+    app: fluentd-k8s
+data:
+  fluent.conf: |-
+    @include system.conf
+    @include containers.conf
+    @include monit.conf
+    @include containers-filters.conf
+    @include output.conf
+    @include prometheus.conf
+  monit.conf: |-
+    <source>
+      @id fluentd.monitor.agent
+      @type monitor_agent
+      @label @clear
+      tag monitor_agent
+    </source>
+    <label @clear>
+      <match monitor_agent>
+        @type null
+      </match>
+    </label>
+  containers.conf: |-
+    <source>
+      @id kubernetes.log
+      @type tail
+      @label @containers
+      tag kubernetes.*
+      path /var/log/containers/*.log
+      exclude_path [
+         "/var/log/containers/fluentd-k8s-*.log",
+         "/var/log/containers/*_kube-system_*.log",
+         "/var/log/containers/*_flux-system_*.log",
+         "/var/log/containers/*_traefik-controller_*.log"
+      ]
+      pos_file /var/log/kubernetes.log.pos
+      path_key source
+      read_from_head true
+      refresh_interval 60
+      <parse>
+        @type regexp
+        expression /^(?<time>.+) (?<stream>stdout|stderr) [^ ]* (?<log>.*)$/
+        time_format  %Y-%m-%dT%H:%M:%S.%N%:z
+        time_key time
+        time_type string
+        localtime false
+      </parse>
+    </source>
+  containers-filters.conf: |-
+    #Events are emitted to the CONCAT label from the container for multiline processing.
+    <label @containers>
+      # add kubernetes metadata
+      <filter kubernetes.**>
+        @type kubernetes_metadata
+        @id kubernetes_metadata
+        annotation_match [ "^fluentd" ]
+        de_dot false
+      </filter>
+      <filter kubernetes.**>
+        @type record_transformer
+        @id kubernetes_metadata.filters
+        enable_ruby
+        <record>
+          fluentd_include ${record.dig("kubernetes", "annotations", "fluentd/include") ? record.dig("kubernetes", "annotations", "fluentd/include") : record.dig("kubernetes", "namespace_annotations", "fluentd/include") ? (record["kubernetes"]["namespace_annotations"]["fluentd/include"]) : ("false")}
+          fluentd_multiline ${record.dig("kubernetes", "annotations", "fluentd/multiline") ? record.dig("kubernetes", "annotations", "fluentd/multiline") : record.dig("kubernetes", "namespace_annotations", "fluentd/multiline") ? (record["kubernetes"]["namespace_annotations"]["fluentd/multiline"]) : ("false")}
+        </record>
+      </filter>
+      <filter kubernetes.**>
+        @type grep
+        @id kubernetes.fluentd.include
+        <regexp>
+          key fluentd_include
+          pattern /^true$/
+        </regexp>
+      </filter>
+      <filter kubernetes.**>
+        @type prometheus
+        @id kubernetes.prometheus.in
+        <metric>
+          name fluentd_input_status_num_records_total
+          type counter
+          desc The total number of incoming records per namespace
+          <labels>
+            namespace $.kubernetes.namespace_name
+          </labels>
+        </metric>
+      </filter>
+      <match kubernetes.**>
+        @type rewrite_tag_filter
+        @id kubernetes_multiline_routing
+        <rule>
+          key fluentd_multiline
+          pattern /^false$/
+          tag plain.${tag}
+        </rule>
+        <rule>
+          key fluentd_multiline
+          pattern /^false$/
+          invert true
+          tag multiline.${tag}
+        </rule>
+      </match>
+      <match multiline.**>
+        @type relabel
+        @label @multiline
+      </match>
+      <match plain.**>
+        @type relabel
+        @label @output
+      </match>
+    </label>
+    <label @multiline>
+      <filter multiline.**>
+        @type concat
+        @id kubernetes_multiline_parsing
+        key log
+        timeout_label @output
+        stream_identity_key stream
+        multiline_start_regexp /(^(\d{2}:\d{2}:\d{2},\d{3})|^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})|^(\d{4}-\d{2}-\d{2}\ \d{2}:\d{2}:\d{2})|^(.*m\d{2}:\d{2}:\d{2})|(^(?!\s+|Caused|Suppressed|.*Exception:|^:)))/
+        flush_interval 1s
+        separator "\n"
+        use_first_timestamp true
+      </filter>
+      # relabel and emit to @output
+      <match multiline.**>
+        @type relabel
+        @label @output
+      </match>
+    </label>
+  output.conf: |-
+    <label @output>
+      <match **>
+        @type copy
+        <store>
+          @id loggly_writer
+          @type loggly
+          loggly_url "https://logs-01.loggly.com/inputs/#{ENV['LOGGLY_TOKEN']}/tag/svu4"
+        </store>
+        <store>
+          @type prometheus
+          <metric>
+            name fluentd_output_status_num_records_total
+            type counter
+            desc The total number of records per namespace
+            <labels>
+              namespace $.kubernetes.namespace_name
+            </labels>
+          </metric>
+        </store>
+      </match>
+    </label>
+  prometheus.conf: |-
+    <source>
+      @type prometheus
+    </source>
+    <source>
+      @type forward
+    </source>
+    <source>
+      @type prometheus_monitor
+      <labels>
+        host ${hostname}
+      </labels>
+    </source>
+    <source>
+      @type prometheus_output_monitor
+      <labels>
+        host ${hostname}
+      </labels>
+    </source>
+  system.conf: |-
+    <system>
+      log_level info
+      root_dir /tmp/fluentd
+    </system>
+---

@@ -1,0 +1,33 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo-include-pod
+  annotations:
+    fluentd/include: "false"
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluentd-logging-demo
+  namespace: demo-include-pod
+  labels:
+    name: fluentd-logging-demo
+spec:
+  selector:
+    matchLabels:
+      name: fluentd-logging-demo
+  template:
+    metadata:
+      labels:
+        name: fluentd-logging-demo
+      annotations:
+        fluentd/include: "true"
+    spec:
+      containers:
+      - name: busybox
+        image: busybox
+        command:
+          - /bin/sh
+          - -c
+          - while sleep 5; do echo "$(date) -- still logging..."; done
